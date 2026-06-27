@@ -65,6 +65,11 @@ struct input_event {
 #define EV_KEY			0x01
 #define EV_ABS			0x03
 #define EV_FF			0x15
+// linux/input.h isn't included here (BTN_ clashes), so mirror KEY_MAX for the
+// EV_KEY capability bitmap used by ALPINE_openInputByKey. [Claude Code, 2026-07-03]
+#ifndef KEY_MAX
+#define KEY_MAX			0x2ff
+#endif
 
 struct ff_replay {
 	__u16 length;
@@ -212,6 +217,26 @@ static int ALPINE_openInputByName(const char* want) {
 	return -1;
 }
 
+// Open the first input device that ADVERTISES a given key code (EV_KEY bit),
+// name-agnostically. The RK817 power key can enumerate under different names
+// across kernels ("rk8xx_pwrkey", "rk817-pwrkey", ...), so matching on the
+// KEY_POWER capability is more robust than a fixed name. [Claude Code, 2026-07-03]
+static int ALPINE_openInputByKey(int keycode) {
+	char path[32];
+	unsigned long bits[(KEY_MAX/(8*sizeof(long)))+1];
+	const size_t wbits = 8*sizeof(long);
+	for (int i=0; i<64; i++) {
+		snprintf(path, sizeof(path), "/dev/input/event%d", i);
+		int fd = open(path, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+		if (fd < 0) continue;
+		memset(bits, 0, sizeof(bits));
+		if (ioctl(fd, EVIOCGBIT(EV_KEY, sizeof(bits)), bits) >= 0
+			&& (bits[keycode/wbits] & (1UL << (keycode%wbits)))) return fd;
+		close(fd);
+	}
+	return -1;
+}
+
 void PLAT_initInput(void) {
 	LOG_info("PLAT_initInput start\n");fflush(stdout);
 	if (exists(NOMENU_PATH)) {
@@ -236,7 +261,11 @@ void PLAT_initInput(void) {
 	{
 		int gp = ALPINE_openInputByName("GO-Super Gamepad");
 		if (gp >= 0) {
-			inputs[0] = ALPINE_openInputByName("rk8xx_pwrkey"); // power key (KEY_POWER); -1 if absent OK
+			// Power key by CAPABILITY (KEY_POWER), name-agnostic; fall back to the
+			// known RK817 name. -1 if genuinely absent is OK. [Claude Code, 2026-07-04]
+			inputs[0] = ALPINE_openInputByKey(RAW_POWER);
+			if (inputs[0] < 0) inputs[0] = ALPINE_openInputByName("rk8xx_pwrkey");
+			LOG_info("Alpine R36S power key fd=%d\n", inputs[0]);fflush(stdout);
 			inputs[1] = gp;               // buttons + dpad + sticks + volume
 			inputs[2] = -1;               // volume keys are on the same node
 			_SELECT_RAW = RAW_SELECT_353; // 314
@@ -520,13 +549,19 @@ void PLAT_pollInput(void) {
 int PLAT_shouldWake(void) {
 	int input;
 	static struct input_event event;
+	// Alpine R36S: with the RK817 power key feeding inputs[0], wake ONLY on
+	// KEY_POWER release — face buttons must not wake a pocketed device. The
+	// any-key fallback below applies only when no power device was found at
+	// init (inputs[0] < 0), where power-only would make sleep unwakeable
+	// (auto-poweroff after sleep_delay would be the only exit).
+	// [Claude Code, 2026-07-04]
+	int power_only = (inputs[0] >= 0);
 	for (int i=0; i<INPUT_COUNT; i++) {
 		input = inputs[i];
 		while (read(input, &event, sizeof(event))==sizeof(event)) {
-			// Alpine R36S: no power-button input; wake on ANY key release.
-			if (event.type==EV_KEY && event.value==0) {
-				return 1;
-			}
+			if (event.type!=EV_KEY || event.value!=0) continue;
+			if (power_only && event.code!=RAW_POWER) continue;
+			return 1;
 		}
 	}
 	return 0;
@@ -1284,7 +1319,14 @@ void PLAT_setRumble(int effect, int strength) {
 }
 
 int PLAT_pickSampleRate(int requested, int max) {
-	return MIN(requested, max);
+	// Always open the device at 48000: the only rate the RK3326 I2S/RK817 path
+	// clocks exactly (12.288MHz/256). Passing through core-native rates lets
+	// ALSA claim impossible ones (SNES 32040 "granted" but consumed ~4-8% slow
+	// per NoFix pacing, warble/hiss in every sync mode) — let libsamplerate do
+	// core->48000 in the app instead, where the ratio is known and controlled.
+	// [Claude Code, 2026-07-04]
+	(void)requested;
+	return MIN(48000, max);
 }
 
 char* PLAT_getModel(void) {

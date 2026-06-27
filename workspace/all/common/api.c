@@ -2260,6 +2260,12 @@ static void PWR_enterSleep(void) {
 	}
 	else {
 		SetRawVolume(MUTE_VOLUME_RAW);
+		// Present a black frame before cutting the backlight, mirroring the
+		// HDMI branch above — otherwise the DRM plane keeps scanning the last
+		// game/launcher frame all through sleep (invisible without external
+		// light, but the panel is latched on old content). [Claude Code, 2026-07-04]
+		PLAT_clearVideo(gfx.screen);
+		PLAT_flip(gfx.screen, 0);
 		PLAT_enableBacklight(0);
 	}
 	system("killall -STOP keymon.elf");

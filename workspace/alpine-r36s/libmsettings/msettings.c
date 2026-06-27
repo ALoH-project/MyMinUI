@@ -104,8 +104,17 @@ void preInitSettings(void) {
 	}
 	preinitialized = 1;
 }
-#define MAX_VOLUME_PATH "/tmp/max_volume.txt"
-#define MIN_VOLUME_PATH "/tmp/min_volume.txt"
+// amixer "Limits" cache for this platform's mixer, recomputed each boot.
+// Namespaced under /tmp so it can't collide with anything else writing /tmp.
+#define MAX_VOLUME_PATH "/tmp/minui-alpine-r36s-max_volume.txt"
+#define MIN_VOLUME_PATH "/tmp/minui-alpine-r36s-min_volume.txt"
+
+// Speaker raw-volume floor: the codec's useful range is ~the top 40% of its raw
+// scale, so the UI slider (1-20) maps onto [floor, max] where
+// floor = min + (max-min) * NUM/DEN. Lower NUM/DEN widens (quieter) the low end.
+#define VOL_RAW_FLOOR_NUM 3
+#define VOL_RAW_FLOOR_DEN 5
+
 char channel[50];
 
 void InitSettings(void) {
@@ -188,7 +197,7 @@ void SetRawVolume(int val) { // 0 - 20
 	char cmd[256];
 	int rawval = 0;	
 	if (val > 0) {
-		rawval = map(val, 1, 20, min_volume + ((max_volume - min_volume) * 3) / 5, max_volume);
+		rawval = map(val, 1, 20, min_volume + ((max_volume - min_volume) * VOL_RAW_FLOOR_NUM) / VOL_RAW_FLOOR_DEN, max_volume);
 	}
 	sprintf(cmd, "amixer sset \"%s\"  %d", channel, rawval);
 	system(cmd);
